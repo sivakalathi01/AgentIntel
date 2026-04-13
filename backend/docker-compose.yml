@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: kiteai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kiteai
+      POSTGRES_USER: kiteai
+      POSTGRES_PASSWORD: kiteai_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kiteai -d kiteai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pg_data:
