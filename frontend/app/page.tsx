@@ -2,7 +2,9 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { useAccount, useSignMessage } from "wagmi";
+import { wrapFetchWithPayment } from "x402-fetch";
+import { useAccount, useSignMessage, useWalletClient } from "wagmi";
+import type { Hex } from "viem";
 import { WalletInfo } from "./wallet-info";
 
 type TaskStatus = "queued" | "running" | "completed" | "failed";
@@ -108,6 +110,7 @@ type Task = {
 type X402PaymentAccept = {
   scheme: string;
   network: string;
+  maxAmountRequired?: string;
   amount: string;
   asset: string;
   payTo: string;
@@ -135,6 +138,25 @@ type KitePassStatus = {
 };
 
 const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+const browserX402SupportedNetworks = new Set([
+  "abstract",
+  "abstract-testnet",
+  "base-sepolia",
+  "base",
+  "avalanche-fuji",
+  "avalanche",
+  "iotex",
+  "solana-devnet",
+  "solana",
+  "sei",
+  "sei-testnet",
+  "polygon",
+  "polygon-amoy",
+  "peaq",
+  "story",
+  "educhain",
+  "skale-base-sepolia",
+]);
 const providerOptions: Array<{ value: ProviderName; label: string }> = [
   { value: "primary_serper", label: "Serper (primary paid)" },
   { value: "secondary_tavily", label: "Tavily (secondary paid)" },
@@ -146,6 +168,7 @@ const providerOptions: Array<{ value: ProviderName; label: string }> = [
 export default function Home() {
   const { address, isConnected } = useAccount();
   const { signMessageAsync } = useSignMessage();
+  const { data: walletClient } = useWalletClient();
   const [goal, setGoal] = useState("");
   const [budget, setBudget] = useState("5");
   const [sessionBudget, setSessionBudget] = useState("10");
@@ -164,6 +187,8 @@ export default function Home() {
   const [sessionPaymentRequired, setSessionPaymentRequired] = useState<X402PaymentRequired | null>(null);
   const [taskPaymentRequired, setTaskPaymentRequired] = useState<X402PaymentRequired | null>(null);
   const [paymentStatusMessage, setPaymentStatusMessage] = useState<string | null>(null);
+  const [sessionPaymentPhase, setSessionPaymentPhase] = useState<string | null>(null);
+  const [taskPaymentPhase, setTaskPaymentPhase] = useState<string | null>(null);
   const [kitePassStatus, setKitePassStatus] = useState<KitePassStatus | null>(null);
   const [kitePassLoading, setKitePassLoading] = useState(false);
 
@@ -289,6 +314,160 @@ export default function Home() {
     return null;
   }
 
+  function parseEip155ChainId(network: string): number {
+    const match = /^eip155:(\d+)$/.exec(network.trim());
+    if (!match) {
+      throw new Error(`Unsupported network format: ${network}`);
+    }
+    return Number(match[1]);
+  }
+
+  function makeNonceHex(): Hex {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    return `0x${hex}` as Hex;
+  }
+
+  function toBase64Json(payload: unknown): string {
+    const json = JSON.stringify(payload);
+    const bytes = new TextEncoder().encode(json);
+    let binary = "";
+    bytes.forEach((b) => {
+      binary += String.fromCharCode(b);
+    });
+    return btoa(binary);
+  }
+
+  async function buildEip155PaymentHeader(
+    paymentRequired: X402PaymentRequired,
+    payerAddress: string,
+  ): Promise<string> {
+    const selected = paymentRequired.accepts[0];
+    if (!selected) {
+      throw new Error("Missing x402 payment requirements.");
+    }
+    if (!walletClient) {
+      throw new Error("Connect wallet to sign x402 payment.");
+    }
+
+    const chainId = parseEip155ChainId(selected.network);
+    const asset = selected.asset;
+    const payTo = selected.payTo;
+    const amountRaw = selected.maxAmountRequired ?? selected.amount;
+    if (!amountRaw || !/^\d+$/.test(amountRaw)) {
+      throw new Error("Invalid x402 amount in payment requirements.");
+    }
+
+    const extra = selected.extra ?? {};
+    const domainName = typeof extra.name === "string" ? extra.name : "";
+    const domainVersion = typeof extra.version === "string" ? extra.version : "";
+    if (!domainName || !domainVersion) {
+      throw new Error("Missing EIP-712 domain metadata (extra.name/version).");
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const validAfter = BigInt(now - 600);
+    const validBefore = BigInt(now + (selected.maxTimeoutSeconds || 300));
+    const value = BigInt(amountRaw);
+    const nonce = makeNonceHex();
+
+    const signature = await walletClient.signTypedData({
+      account: payerAddress as Hex,
+      domain: {
+        name: domainName,
+        version: domainVersion,
+        chainId,
+        verifyingContract: asset as Hex,
+      },
+      types: {
+        TransferWithAuthorization: [
+          { name: "from", type: "address" },
+          { name: "to", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "validAfter", type: "uint256" },
+          { name: "validBefore", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      },
+      primaryType: "TransferWithAuthorization",
+      message: {
+        from: payerAddress as Hex,
+        to: payTo as Hex,
+        value,
+        validAfter,
+        validBefore,
+        nonce,
+      },
+    });
+
+    const accepted = {
+      ...selected,
+      amount: amountRaw,
+      maxAmountRequired: amountRaw,
+      extra: {
+        name: domainName,
+        version: domainVersion,
+        ...extra,
+      },
+    };
+
+    const paymentPayload = {
+      x402Version: paymentRequired.x402Version,
+      payload: {
+        signature,
+        authorization: {
+          from: payerAddress,
+          to: payTo,
+          value: value.toString(),
+          validAfter: validAfter.toString(),
+          validBefore: validBefore.toString(),
+          nonce,
+        },
+      },
+      accepted,
+    };
+
+    return toBase64Json(paymentPayload);
+  }
+
+  function getX402MaxValue(paymentRequired: X402PaymentRequired): bigint | undefined {
+    const selected = paymentRequired.accepts[0];
+    const raw = selected?.maxAmountRequired ?? selected?.amount;
+    if (typeof raw === "string" && /^\d+$/.test(raw)) {
+      return BigInt(raw);
+    }
+    return undefined;
+  }
+
+  async function retryWithX402Payment(
+    url: string,
+    init: RequestInit,
+    paymentRequired: X402PaymentRequired,
+    payerAddress: string,
+  ): Promise<Response> {
+    const network = paymentRequired.accepts[0]?.network;
+    if (network?.startsWith("eip155:")) {
+      const header = await buildEip155PaymentHeader(paymentRequired, payerAddress);
+      const headers = new Headers(init.headers ?? {});
+      headers.set("PAYMENT-SIGNATURE", header);
+      headers.set("X-PAYMENT", header);
+      return fetch(url, { ...init, headers });
+    }
+
+    if (network && !browserX402SupportedNetworks.has(network)) {
+      throw new Error(`Unsupported browser x402 network: '${network}'.`);
+    }
+
+    if (!walletClient) {
+      throw new Error("Connect wallet to complete x402 payment retry in browser.");
+    }
+
+    const maxValue = getX402MaxValue(paymentRequired);
+    const paidFetch = wrapFetchWithPayment(fetch, walletClient as any, maxValue);
+    return paidFetch(url, init);
+  }
+
   function toggleProvider(provider: ProviderName) {
     setAllowedProviders((current) => {
       if (current.includes(provider)) {
@@ -306,6 +485,7 @@ export default function Home() {
     setSessionSigningState(null);
     setPaymentStatusMessage(null);
     setSessionPaymentRequired(null);
+    setSessionPaymentPhase(null);
 
     try {
       let signedPayload: {
@@ -351,7 +531,49 @@ export default function Home() {
       if (response.status === 402) {
         const paymentRequired = await readX402PaymentRequired(response);
         setSessionPaymentRequired(paymentRequired);
-        setPaymentStatusMessage("Session creation now requires a real x402-compatible client or agent.");
+        setSessionPaymentPhase("402 received. Preparing x402 retry...");
+        if (!paymentRequired) {
+          setPaymentStatusMessage("Session payment required, but payment details could not be parsed.");
+          setSessionPaymentPhase("Payment details unavailable.");
+          return;
+        }
+
+        if (!isConnected || !address) {
+          setPaymentStatusMessage("Connect wallet to complete x402 payment retry for session creation.");
+          setSessionPaymentPhase("Waiting for wallet connection.");
+          return;
+        }
+
+        setSessionPaymentPhase("Requesting wallet signature for x402 payment...");
+        setSessionSigningState("Creating x402 payment signature and retrying session...");
+        const retryResponse = await retryWithX402Payment(
+          `${backendUrl}/sessions`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              budget_limit: Number(sessionBudget),
+              valid_for_hours: Number(validForHours),
+              allowed_providers: allowedProviders,
+              ...signedPayload,
+            }),
+          },
+          paymentRequired,
+          address,
+        );
+
+        if (!retryResponse.ok) {
+          setSessionPaymentPhase("Retry failed after payment attempt.");
+          throw new Error(await readApiError(retryResponse, "Create session failed after x402 retry"));
+        }
+
+        const paidSession: Session = await retryResponse.json();
+        setSession(paidSession);
+        setSessionPaymentRequired(null);
+        setSessionPaymentPhase("Payment settled and session created.");
+        setTask(null);
+        setPaymentStatusMessage("Session payment settled successfully via x402.");
+        await refreshSecurityMetrics();
         return;
       }
 
@@ -406,6 +628,7 @@ export default function Home() {
     setTaskSigningState(null);
     setPaymentStatusMessage(null);
     setTaskPaymentRequired(null);
+    setTaskPaymentPhase(null);
 
     try {
       let signedPayload: {
@@ -464,7 +687,49 @@ export default function Home() {
       if (response.status === 402) {
         const paymentRequired = await readX402PaymentRequired(response);
         setTaskPaymentRequired(paymentRequired);
-        setPaymentStatusMessage("Task execution now requires a real x402-compatible client or agent.");
+        setTaskPaymentPhase("402 received. Preparing x402 retry...");
+        if (!paymentRequired) {
+          setPaymentStatusMessage("Task payment required, but payment details could not be parsed.");
+          setTaskPaymentPhase("Payment details unavailable.");
+          return;
+        }
+
+        if (!isConnected || !address) {
+          setPaymentStatusMessage("Connect wallet to complete x402 payment retry for task execution.");
+          setTaskPaymentPhase("Waiting for wallet connection.");
+          return;
+        }
+
+        setTaskPaymentPhase("Requesting wallet signature for x402 payment...");
+        setTaskSigningState("Creating x402 payment signature and retrying task...");
+        const retryResponse = await retryWithX402Payment(
+          `${backendUrl}/tasks`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              goal,
+              budget: Number(budget),
+              session_id: session.id,
+              ...signedPayload,
+            }),
+          },
+          paymentRequired,
+          address,
+        );
+
+        if (!retryResponse.ok) {
+          setTaskPaymentPhase("Retry failed after payment attempt.");
+          throw new Error(await readApiError(retryResponse, "Create task failed after x402 retry"));
+        }
+
+        const paidTask: Task = await retryResponse.json();
+        setTask(paidTask);
+        setTaskPaymentRequired(null);
+        setTaskPaymentPhase("Payment settled and task created.");
+        setPaymentStatusMessage("Task payment settled successfully via x402.");
+        await refreshSession(session.id);
+        await refreshSecurityMetrics();
         return;
       }
 
@@ -566,6 +831,7 @@ export default function Home() {
               <p className="meta">Pay To: {sessionPaymentRequired.accepts[0]?.payTo}</p>
               <p className="meta">Asset: {sessionPaymentRequired.accepts[0]?.asset}</p>
               <p className="meta">Amount (atomic units): {sessionPaymentRequired.accepts[0]?.amount}</p>
+              {sessionPaymentPhase && <p className="meta"><strong>Flow:</strong> {sessionPaymentPhase}</p>}
             </div>
           )}
 
@@ -577,12 +843,13 @@ export default function Home() {
               <p className="meta">Pay To: {taskPaymentRequired.accepts[0]?.payTo}</p>
               <p className="meta">Asset: {taskPaymentRequired.accepts[0]?.asset}</p>
               <p className="meta">Amount (atomic units): {taskPaymentRequired.accepts[0]?.amount}</p>
+              {taskPaymentPhase && <p className="meta"><strong>Flow:</strong> {taskPaymentPhase}</p>}
             </div>
           )}
 
           <p className="meta">
-            The browser UI does not generate real x402 payment signatures. Use an x402-compatible agent, wallet, or
-            client that can retry the request with PAYMENT-SIGNATURE or X-PAYMENT.
+            If a 402 is returned, the UI will attempt an in-browser x402 retry using your connected wallet.
+            If retry fails, use an x402-compatible client or agent that can send PAYMENT-SIGNATURE or X-PAYMENT.
           </p>
         </section>
       )}
