@@ -93,6 +93,8 @@ type Proof = {
   proof_status: "prepared" | "recorded_on_kite_pending" | "recorded_on_kite" | "failed";
   created_at: string;
   explorer_url: string | null;
+  x402_settlement_tx_hash?: string | null;
+  x402_settlement_explorer_url?: string | null;
 };
 
 type Task = {
@@ -1022,10 +1024,27 @@ export default function Home() {
               <p><strong>Proof Status:</strong> {task.proof.proof_status}</p>
               <p><strong>Report Hash:</strong> <span className="hashValue">{task.proof.report_hash}</span></p>
               <p><strong>Prepared At:</strong> {new Date(task.proof.created_at).toLocaleString()}</p>
+              {task.proof.x402_settlement_tx_hash ? (
+                <>
+                  <p>
+                    <strong>x402 Settlement Tx:</strong>{" "}
+                    <span className="hashValue">{task.proof.x402_settlement_tx_hash}</span>
+                  </p>
+                  {task.proof.x402_settlement_explorer_url ? (
+                    <p>
+                      <a href={task.proof.x402_settlement_explorer_url} target="_blank" rel="noreferrer">
+                        View x402 Settlement on Kite Explorer
+                      </a>
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="meta">x402 settlement transaction will appear when payment is enforced.</p>
+              )}
               {task.proof.explorer_url ? (
                 <p>
                   <a href={task.proof.explorer_url} target="_blank" rel="noreferrer">
-                    View on Kite Explorer
+                    View Proof Record on Kite Explorer
                   </a>
                 </p>
               ) : (

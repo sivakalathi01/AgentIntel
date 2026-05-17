@@ -208,6 +208,8 @@ class ProofResponse(BaseModel):
     proof_status: Literal["prepared", "recorded_on_kite_pending", "recorded_on_kite", "failed"]
     created_at: str
     explorer_url: str | None = None
+    x402_settlement_tx_hash: str | None = None
+    x402_settlement_explorer_url: str | None = None
 
 
 class CostBreakdown(BaseModel):
@@ -1828,7 +1830,7 @@ def build_task_challenge_message(
     )
 
 
-def verify_wallet_signature(payload: SessionCreateRequest) -> str | None:
+def verify_wallet_signature(payload: SessionCreateRequest, *, consume_challenge: bool = True) -> str | None:
     prune_challenges()
     has_any_wallet_field = bool(payload.wallet_address or payload.challenge_id or payload.signature)
     has_all_wallet_fields = bool(payload.wallet_address and payload.challenge_id and payload.signature)
@@ -1864,12 +1866,13 @@ def verify_wallet_signature(payload: SessionCreateRequest) -> str | None:
     if recovered_address.lower() != wallet_address.lower():
         raise HTTPException(status_code=400, detail="Signature does not match wallet address")
 
-    challenge.used = True
-    persist_session_challenge(challenge)
+    if consume_challenge:
+        challenge.used = True
+        persist_session_challenge(challenge)
     return wallet_address
 
 
-def verify_task_signature(payload: TaskCreateRequest, session: InMemorySession) -> None:
+def verify_task_signature(payload: TaskCreateRequest, session: InMemorySession, *, consume_challenge: bool = True) -> None:
     prune_challenges()
     session_wallet = session.wallet_address
     has_any_wallet_field = bool(payload.wallet_address or payload.challenge_id or payload.signature)
@@ -1920,6 +1923,27 @@ def verify_task_signature(payload: TaskCreateRequest, session: InMemorySession) 
     if recovered_address.lower() != wallet_address.lower():
         raise HTTPException(status_code=400, detail="Task signature does not match wallet address")
 
+    if consume_challenge:
+        challenge.used = True
+        persist_task_challenge(challenge)
+
+
+def consume_session_challenge(challenge_id: str) -> None:
+    challenge = get_session_challenge(challenge_id)
+    if challenge is None:
+        raise HTTPException(status_code=400, detail="Invalid or missing challenge_id")
+    if challenge.used:
+        raise HTTPException(status_code=400, detail="Challenge already used")
+    challenge.used = True
+    persist_session_challenge(challenge)
+
+
+def consume_task_challenge(challenge_id: str) -> None:
+    challenge = get_task_challenge(challenge_id)
+    if challenge is None:
+        raise HTTPException(status_code=400, detail="Invalid or missing task challenge_id")
+    if challenge.used:
+        raise HTTPException(status_code=400, detail="Task challenge already used")
     challenge.used = True
     persist_task_challenge(challenge)
 
@@ -1965,7 +1989,27 @@ def build_proof(report: ReportResponse) -> ProofResponse:
         proof_status="prepared",
         created_at=now_utc().isoformat(),
         explorer_url=None,
+        x402_settlement_tx_hash=None,
+        x402_settlement_explorer_url=None,
     )
+
+
+def get_task_settlement_tx_hash(task_id: str) -> str | None:
+    for intent in list_payment_intents():
+        if intent.task_id != task_id or intent.status != "confirmed":
+            continue
+
+        metadata = intent.metadata or {}
+        settle_response = metadata.get("settleResponse") if isinstance(metadata, dict) else None
+        if isinstance(settle_response, dict):
+            transaction = settle_response.get("transaction")
+            if isinstance(transaction, str) and transaction.startswith("0x"):
+                return transaction
+
+        if intent.provider_intent_id and intent.provider_intent_id.startswith("0x"):
+            return intent.provider_intent_id
+
+    return None
 
 
 def build_kite_explorer_url(tx_hash: str) -> str:
@@ -2109,7 +2153,7 @@ def create_session_challenge(payload: SessionChallengeRequest, request: Request)
 
 @app.post("/sessions", response_model=SessionResponse)
 async def create_session(payload: SessionCreateRequest, request: Request, response: Response) -> SessionResponse:
-    wallet_address = verify_wallet_signature(payload)
+    wallet_address = verify_wallet_signature(payload, consume_challenge=False)
     await require_x402_payment(
         request,
         response,
@@ -2119,6 +2163,8 @@ async def create_session(payload: SessionCreateRequest, request: Request, respon
         output_schema=build_session_output_schema(),
         expected_wallet_address=wallet_address,
     )
+    if payload.challenge_id:
+        consume_session_challenge(payload.challenge_id)
     session_id = str(uuid4())
     current_time = now_utc()
     session = InMemorySession(
@@ -2214,7 +2260,8 @@ def create_task_challenge(payload: TaskChallengeRequest, request: Request) -> Ta
 async def create_task(payload: TaskCreateRequest, request: Request, response: Response) -> TaskResponse:
     session = get_session_or_404(payload.session_id)
     ensure_session_active(session)
-    verify_task_signature(payload, session)
+    task_id = str(uuid4())
+    verify_task_signature(payload, session, consume_challenge=False)
     await require_x402_payment(
         request,
         response,
@@ -2224,7 +2271,10 @@ async def create_task(payload: TaskCreateRequest, request: Request, response: Re
         output_schema=build_task_output_schema(),
         expected_wallet_address=session.wallet_address,
         session_id=payload.session_id,
+        task_id=task_id,
     )
+    if payload.challenge_id:
+        consume_task_challenge(payload.challenge_id)
 
     available_budget = session_available_budget(session)
     if payload.budget > available_budget:
@@ -2233,7 +2283,6 @@ async def create_task(payload: TaskCreateRequest, request: Request, response: Re
             detail=f"Task budget exceeds available session budget ({available_budget:.2f})",
         )
 
-    task_id = str(uuid4())
     now = now_utc().isoformat()
     session.spent_budget = round(session.spent_budget + payload.budget, 2)
     persist_session(session)
@@ -2601,6 +2650,10 @@ async def run_task(task_id: str) -> None:
             persist_session(session)
             append_step(task, "info", f"Refunded ${refund_amount:.4f} (reserved ${reserved_budget:.2f} - actual ${actual_cost:.4f})")
         task.proof = build_proof(task.report)
+        settlement_tx_hash = get_task_settlement_tx_hash(task.id)
+        if settlement_tx_hash:
+            task.proof.x402_settlement_tx_hash = settlement_tx_hash
+            task.proof.x402_settlement_explorer_url = build_kite_explorer_url(settlement_tx_hash)
         append_step(task, "success", "Prepared verifiable proof record for the report")
 
         if kite_proof_is_configured():
