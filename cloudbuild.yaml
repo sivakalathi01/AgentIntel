@@ -1,0 +1,36 @@
+steps:
+  # Build backend Docker image
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/agentintel-backend:$SHORT_SHA"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/agentintel-backend:latest"
+      - "-f"
+      - "backend/Dockerfile"
+      - "backend/"
+    dir: "."
+
+  # Push image to Container Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "gcr.io/$PROJECT_ID/agentintel-backend:$SHORT_SHA"
+
+  # Deploy to Cloud Run
+  - name: "gcr.io/cloud-builders/gke-deploy"
+    args:
+      - run
+      - "--service=agentintel-backend"
+      - "--region=us-central1"
+      - "--image=gcr.io/$PROJECT_ID/agentintel-backend:$SHORT_SHA"
+
+images:
+  - "gcr.io/$PROJECT_ID/agentintel-backend:$SHORT_SHA"
+  - "gcr.io/$PROJECT_ID/agentintel-backend:latest"
+
+options:
+  machineType: "N1_HIGHCPU_8"
+
+timeout: "3600s"

@@ -1,0 +1,25 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "installCommand": "npm install",
+  "framework": "nextjs",
+  "env": [
+    {
+      "key": "NEXT_PUBLIC_BACKEND_URL",
+      "description": "Backend API URL",
+      "value": "https://agentintel-backend-<PROJECT_ID>.run.app"
+    }
+  ],
+  "functions": {
+    "frontend/app/**": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  },
+  "regions": ["sfo1"],
+  "git": {
+    "deploymentEnabled": {
+      "main": true
+    }
+  }
+}

@@ -1,0 +1,48 @@
+# Ignore .git and .hg folders, also ignore .gitignore and .hgignore files.
+.git
+.hg
+.gitignore
+.hgignore
+
+# Ignore node_modules for faster builds
+node_modules/
+
+# Ignore frontend build artifacts
+frontend/.next/
+frontend/out/
+
+# Ignore Python cache
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.egg-info
+.pytest_cache/
+
+# Ignore virtual environments
+.venv/
+venv/
+env/
+
+# Ignore temporary files
+.tmp/
+*.tmp
+*.log
+
+# Ignore environment files (will be set via Cloud Run secrets)
+backend/.env
+
+# Ignore IDE and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Ignore test files
+tests/
+**/test_*.py
+
+# Ignore node_modules in backend
+backend/node_modules/
