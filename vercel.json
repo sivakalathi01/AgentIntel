@@ -7,7 +7,7 @@
     {
       "key": "NEXT_PUBLIC_BACKEND_URL",
       "description": "Backend API URL",
-      "value": "https://agentintel-backend-<PROJECT_ID>.run.app"
+      "value": "https://agentintel-backend-15484735338.europe-west1.run.app"
     }
   ],
   "functions": {
