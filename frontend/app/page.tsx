@@ -232,7 +232,8 @@ export default function Home() {
         setKitePassStatus(null);
         return;
       }
-            <h1>AgentIntel</h1>
+      if (!response.ok) {
+        setKitePassStatus(null);
         return;
       }
       const data: KitePassStatus = await response.json();
@@ -800,7 +801,7 @@ export default function Home() {
 
   return (
     <main>
-      <h1>AgentIntel - Day 3</h1>
+      <h1>AgentIntel</h1>
       <p className="meta">Create a scoped session, choose allowed providers, and run autonomous research within a revocable budget.</p>
 
       <section className="card walletSection">
