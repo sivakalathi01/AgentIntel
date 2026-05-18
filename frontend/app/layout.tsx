@@ -3,8 +3,8 @@ import type { Metadata } from "next";
 import { ReactNode } from "react";
 
 export const metadata: Metadata = {
-  title: "AgentIntel Day 1",
-  description: "Day 1 skeleton for AgentIntel",
+  title: "AgentIntel",
+  description: "AgentIntel autonomous research interface",
 };
 
 import { Providers } from "./providers";

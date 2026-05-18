@@ -232,7 +232,7 @@ export default function Home() {
         setKitePassStatus(null);
         return;
       }
-      if (!response.ok) {
+            <h1>AgentIntel</h1>
         return;
       }
       const data: KitePassStatus = await response.json();
