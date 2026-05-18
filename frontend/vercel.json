@@ -3,13 +3,10 @@
   "outputDirectory": ".next",
   "installCommand": "npm install",
   "framework": "nextjs",
-  "env": [
-    {
-      "key": "NEXT_PUBLIC_BACKEND_URL",
-      "description": "Backend API URL",
-      "value": "https://agentintel-backend-15484735338.europe-west1.run.app"
-    }
-  ],
+  "env": {
+    "NEXT_PUBLIC_BACKEND_URL": "https://agentintel-backend-15484735338.europe-west1.run.app",
+    "NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID": "agentintel"
+  },
   "functions": {
     "app/**": {
       "memory": 1024,
